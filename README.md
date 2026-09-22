@@ -40,3 +40,11 @@ Run **Publish folder to Confluence** from the command palette.
 Subfolders become pages, notes become their children. A file starting with `_` becomes the body of its own folder's page instead of a separate child. Page titles come from file names.
 
 Publishing is idempotent: pages are matched by title and updated, existing attachments are skipped.
+
+## Title collisions
+
+Confluence page titles are unique per **space**, not per parent. A note is therefore matched across the whole space: if a page with the same title already exists elsewhere, it is updated and moved under the target parent rather than duplicated. The run reports this as `adopted <title> (was under …)`.
+
+This means a generic title like `1` or `2` will attach to whatever unrelated page already holds that title in the space, and overwrite it with the vault content. Publish into a dedicated space, or give notes distinctive names.
+
+A page that fails does not abort the run — the remaining pages are still published, and the final notice lists every failure by name.

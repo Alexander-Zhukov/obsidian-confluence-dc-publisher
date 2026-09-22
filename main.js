@@ -336,6 +336,15 @@ class ConfluenceClient {
     return result.results.find((page) => page.title === title) || null;
   }
 
+  async findInSpace(spaceKey, title) {
+    const result = await this.request(
+      "GET",
+      `/rest/api/content?type=page&spaceKey=${encodeURIComponent(spaceKey)}` +
+        `&title=${encodeURIComponent(title)}&limit=${PAGE_LIMIT}&expand=version,ancestors`
+    );
+    return result.results.find((page) => page.title === title) || null;
+  }
+
   createPage(spaceKey, parentId, title, body) {
     return this.request("POST", "/rest/api/content", {
       contentType: "application/json",
@@ -349,17 +358,21 @@ class ConfluenceClient {
     });
   }
 
-  updatePage(page, spaceKey, body) {
+  updatePage(page, spaceKey, body, parentId) {
+    const payload = {
+      id: page.id,
+      type: "page",
+      title: page.title,
+      space: { key: spaceKey },
+      body: { storage: { value: body, representation: "storage" } },
+      version: { number: page.version.number + 1 },
+    };
+    if (parentId) {
+      payload.ancestors = [{ id: parentId }];
+    }
     return this.request("PUT", `/rest/api/content/${page.id}`, {
       contentType: "application/json",
-      body: JSON.stringify({
-        id: page.id,
-        type: "page",
-        title: page.title,
-        space: { key: spaceKey },
-        body: { storage: { value: body, representation: "storage" } },
-        version: { number: page.version.number + 1 },
-      }),
+      body: JSON.stringify(payload),
     });
   }
 
@@ -397,6 +410,7 @@ class VaultPublisher {
     this.converter = converter;
     this.spaceKey = spaceKey;
     this.report = report;
+    this.failures = [];
   }
 
   static indexFile(folder) {
@@ -425,16 +439,24 @@ class VaultPublisher {
   async publishChildren(folder, pageId) {
     const children = folder.children.slice().sort((a, b) => a.name.localeCompare(b.name));
     for (const child of children) {
-      if (child.children !== undefined) {
-        const index = VaultPublisher.indexFile(child);
-        const document = index ? await this.prepare(index) : { body: "", attachments: [] };
-        const childId = await this.publishBody(child.name, document.body, pageId);
-        await this.publishAttachments(childId, child, document.attachments);
-        await this.publishChildren(child, childId);
-      } else if (child.name.toLowerCase().endsWith(MARKDOWN_SUFFIX) && !child.name.startsWith(INDEX_PREFIX)) {
-        const document = await this.prepare(child);
-        const noteId = await this.publishBody(child.basename, document.body, pageId);
-        await this.publishAttachments(noteId, child.parent, document.attachments);
+      // Одна упавшая страница не должна обрывать весь прогон: записываем сбой,
+      // называем виновника и идём дальше — остальные ветки публикуются.
+      try {
+        if (child.children !== undefined) {
+          const index = VaultPublisher.indexFile(child);
+          const document = index ? await this.prepare(index) : { body: "", attachments: [] };
+          const childId = await this.publishBody(child.name, document.body, pageId);
+          await this.publishAttachments(childId, child, document.attachments);
+          await this.publishChildren(child, childId);
+        } else if (child.name.toLowerCase().endsWith(MARKDOWN_SUFFIX) && !child.name.startsWith(INDEX_PREFIX)) {
+          const document = await this.prepare(child);
+          const noteId = await this.publishBody(child.basename, document.body, pageId);
+          await this.publishAttachments(noteId, child.parent, document.attachments);
+        }
+      } catch (error) {
+        const name = child.children !== undefined ? child.name : child.basename;
+        this.failures.push({ name, path: child.path, message: error.message });
+        this.report(`FAILED ${name}: ${error.message}`);
       }
     }
   }
@@ -446,14 +468,24 @@ class VaultPublisher {
 
   async publishBody(title, body, parentId) {
     const existing = await this.client.findChild(parentId, title);
-    if (!existing) {
-      const created = await this.client.createPage(this.spaceKey, parentId, title, body);
-      this.report(`created ${title}`);
-      return created.id;
+    if (existing) {
+      await this.client.updatePage(existing, this.spaceKey, body);
+      this.report(`updated ${title}`);
+      return existing.id;
     }
-    await this.client.updatePage(existing, this.spaceKey, body);
-    this.report(`updated ${title}`);
-    return existing.id;
+    // Заголовок уникален в пределах всего спейса, а не внутри родителя: страница
+    // с таким именем может лежать в другой ветке. Создавать дубль нельзя — Confluence
+    // ответит 400, поэтому находим её по спейсу, обновляем и переносим к нужному родителю.
+    const elsewhere = await this.client.findInSpace(this.spaceKey, title);
+    if (elsewhere) {
+      const where = (elsewhere.ancestors || []).map((item) => item.title).join(" / ") || "root";
+      await this.client.updatePage(elsewhere, this.spaceKey, body, parentId);
+      this.report(`adopted ${title} (was under ${where})`);
+      return elsewhere.id;
+    }
+    const created = await this.client.createPage(this.spaceKey, parentId, title, body);
+    this.report(`created ${title}`);
+    return created.id;
   }
 
   async publishAttachments(pageId, folder, names) {
@@ -578,7 +610,17 @@ class ConfluencePublisherPlugin extends (obsidian ? obsidian.Plugin : Object) {
       });
       await publisher.publish(folder, this.settings.rootPageId);
       notice.hide();
-      new obsidian.Notice(`Confluence: done, ${count} operations`, 6000);
+      const failures = publisher.failures;
+      if (failures.length === 0) {
+        new obsidian.Notice(`Confluence: done, ${count} operations`, 6000);
+      } else {
+        const listed = failures.map((item) => `${item.name}: ${item.message}`).join("\n");
+        console.error("Confluence publish failures:", failures);
+        new obsidian.Notice(
+          `Confluence: ${count} operations, ${failures.length} failed\n${listed}`,
+          20000
+        );
+      }
     } catch (error) {
       notice.hide();
       new obsidian.Notice(`Confluence: ${error.message}`, 12000);
