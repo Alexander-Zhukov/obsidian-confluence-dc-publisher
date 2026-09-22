@@ -1,0 +1,9 @@
+{
+  "id": "confluence-dc-publisher",
+  "name": "Confluence DC Publisher",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Publish vault folders to Confluence Data Center: images become attachments, callouts and code blocks become native macros.",
+  "author": "Alex Zhukov",
+  "isDesktopOnly": true
+}
