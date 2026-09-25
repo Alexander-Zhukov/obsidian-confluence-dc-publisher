@@ -31,6 +31,10 @@ Run **Publish folder to Confluence** from the command palette.
 | Fenced code blocks | `code` macro with language |
 | `> [!note]` callouts | `info` / `tip` / `note` / `warning` macros |
 | `- [ ]` / `- [x]` | ☐ / ☑ |
+| Single newline inside a paragraph | `<br />`, or a space when *Strict line breaks* is on in Settings → Editor |
+| Two trailing spaces or trailing `\` | `<br />` in either mode |
+| `<br>` (e.g. line breaks inside a table cell) | `<br />` |
+| `\|` inside a table cell | literal `\|`, also within inline code |
 | `![[image.png\|200]]` | attachment + `ac:image` |
 | `[[Note]]`, `[[Note\|label]]` | `ac:link` to the page |
 | YAML frontmatter | stripped |

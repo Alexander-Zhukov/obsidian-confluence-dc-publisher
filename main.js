@@ -84,8 +84,9 @@ class FragmentStore {
 }
 
 class MarkdownConverter {
-  constructor(pageTitles) {
+  constructor(pageTitles, options) {
     this.pageTitles = pageTitles instanceof Set ? pageTitles : new Set(pageTitles || []);
+    this.strictLineBreaks = Boolean((options || {}).strictLineBreaks);
   }
 
   convert(source) {
@@ -180,13 +181,15 @@ class MarkdownConverter {
   }
 
   readTable(lines, start, output, context) {
+    // `\|` is a literal pipe inside a cell (GFM), even within a code span, so it
+    // must neither split the row nor survive as a backslash.
     const parseRow = (line) =>
       line
         .trim()
         .replace(/^\|/, "")
-        .replace(/\|$/, "")
-        .split("|")
-        .map((cell) => cell.trim());
+        .replace(/(?<!\\)\|$/, "")
+        .split(/(?<!\\)\|/)
+        .map((cell) => cell.trim().replace(/\\\|/g, "|"));
     const header = parseRow(lines[start]);
     let index = start + 2;
     const rows = [];
@@ -287,6 +290,10 @@ class MarkdownConverter {
 
     result = result.replace(/`([^`]+)`/g, (match, code) => store.store(`<code>${escapeXml(code)}</code>`));
 
+    // Obsidian renders inline <br> (the only way to break a line inside a table cell);
+    // keep it as markup instead of escaping it into visible text.
+    result = result.replace(/<br\s*\/?>/gi, () => store.store("<br />"));
+
     result = result.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (match, label, href) =>
       store.store(`<a href="${escapeXml(href)}">${escapeXml(label)}</a>`)
     );
@@ -295,7 +302,10 @@ class MarkdownConverter {
     result = result.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     result = result.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
     result = result.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-    result = result.replace(/\n/g, " ");
+    // Two trailing spaces or a trailing backslash is a hard break in any mode; a bare
+    // newline follows the vault's "Strict line breaks" setting, as Obsidian renders it.
+    result = result.replace(/(?: {2,}|\\)\n/g, "<br />");
+    result = result.replace(/\n/g, this.strictLineBreaks ? " " : "<br />");
     return result;
   }
 }
@@ -580,6 +590,13 @@ class ConfluencePublisherPlugin extends (obsidian ? obsidian.Plugin : Object) {
     await this.saveData(this.settings);
   }
 
+  // getConfig is not in the public API typings, but it is how core settings are read;
+  // without it fall back to Obsidian's default (strict line breaks off).
+  strictLineBreaks() {
+    const vault = this.app.vault;
+    return typeof vault.getConfig === "function" && vault.getConfig("strictLineBreaks") === true;
+  }
+
   resolveFolder() {
     if (!this.settings.publishFolder) {
       return this.app.vault.getRoot();
@@ -602,7 +619,9 @@ class ConfluencePublisherPlugin extends (obsidian ? obsidian.Plugin : Object) {
       const folder = this.resolveFolder();
       const client = new ConfluenceClient(this.settings);
       const target = await client.getPage(this.settings.rootPageId);
-      const converter = new MarkdownConverter(collectPageTitles(folder));
+      const converter = new MarkdownConverter(collectPageTitles(folder), {
+        strictLineBreaks: this.strictLineBreaks(),
+      });
       let count = 0;
       const publisher = new VaultPublisher(this.app, client, converter, target.space.key, (message) => {
         count += 1;
